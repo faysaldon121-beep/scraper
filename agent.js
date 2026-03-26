@@ -444,7 +444,7 @@ const path = require('path');
 // Import the Video model (we'll define it next)
 const Video = require('./models/Video');
 
-const BASE_URL = 'http://178.128.25.172/';  // replace with actual adult site URL
+const BASE_URL = 'https://128.199.174.22/tag/';  // replace with actual adult site URL
 const OUTPUT_FILE = path.join(__dirname, 'videos_data.json');
 const MAX_PAGES = 50;
 const TIMEOUT = 30000;
