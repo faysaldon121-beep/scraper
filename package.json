@@ -1,0 +1,9 @@
+{
+"scripts": {
+    "scrape": "node agent.js"
+  },
+  "dependencies": {
+    "puppeteer": "^24.40.0",
+ "mongoose": "^8.0.0"
+  }
+}
