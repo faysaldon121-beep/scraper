@@ -7,7 +7,7 @@ on:
 
 jobs:
   scrape:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-22.04  # Pin to Ubuntu 22.04 to avoid the package issues
 
     steps:
       - name: Checkout code
@@ -16,30 +16,52 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '18'  # LTS version for stability
           cache: 'npm'
 
       - name: Install dependencies
         run: npm install
 
-      - name: Install Puppeteer dependencies
+      - name: Install Puppeteer dependencies for Ubuntu 22.04
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libnss3 \
+            ca-certificates \
+            fonts-liberation \
+            libasound2 \
             libatk-bridge2.0-0 \
-            libdrm2 \
-            libxkbcommon0 \
+            libatk1.0-0 \
+            libc6 \
+            libcairo2 \
+            libcups2 \
+            libdbus-1-3 \
+            libexpat1 \
+            libfontconfig1 \
             libgbm1 \
-            libxss1 \
-            libasound2t64 \
-            libxrandr2 \
+            libgcc1 \
+            libglib2.0-0 \
+            libgtk-3-0 \
+            libnspr4 \
+            libnss3 \
+            libpango-1.0-0 \
+            libpangocairo-1.0-0 \
+            libstdc++6 \
+            libx11-6 \
+            libx11-xcb1 \
+            libxcb1 \
             libxcomposite1 \
+            libxcursor1 \
             libxdamage1 \
             libxext6 \
             libxfixes3 \
             libxi6 \
-            libxtst6
+            libxrandr2 \
+            libxrender1 \
+            libxss1 \
+            libxtst6 \
+            lsb-release \
+            wget \
+            xdg-utils
 
       - name: Run scraper
         run: npm run scrape
