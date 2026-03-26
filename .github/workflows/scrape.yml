@@ -20,10 +20,9 @@ jobs:
           cache: 'npm'
 
       - name: Install dependencies
-        # Use 'npm install' if you don't have a package-lock.json, or commit it and use 'npm ci'
         run: npm install
 
-      - name: Install Puppeteer dependencies (minimal)
+      - name: Install Puppeteer dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y \
@@ -32,7 +31,15 @@ jobs:
             libdrm2 \
             libxkbcommon0 \
             libgbm1 \
-            libasound2
+            libxss1 \
+            libasound2t64 \
+            libxrandr2 \
+            libxcomposite1 \
+            libxdamage1 \
+            libxext6 \
+            libxfixes3 \
+            libxi6 \
+            libxtst6
 
       - name: Run scraper
         run: npm run scrape
