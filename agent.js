@@ -3,7 +3,7 @@
 // const fs = require('fs');
 // const path = require('path');
 
-// const BASE_URL = 'http://178.128.25.172/';
+// const BASE_URL = 'https://128.199.174.22/tag/';
 // const OUTPUT_FILE = path.join(__dirname, 'peskgames_data.json');
 // const MAX_PAGES = 50; // Safety limit
 // const TIMEOUT = 30000;
