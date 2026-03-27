@@ -2,7 +2,8 @@
 const puppeteer = require("puppeteer");
 const fs = require("fs");
 const path = require("path");
-
+const mongoose = require("mongoose");
+const Game = require("../models/Game");
 const BASE_URL = "https://peskgames.com";
 const OUTPUT = path.join(__dirname, "games_data.json");
 const NAV_TIMEOUT = 60000;
@@ -40,10 +41,10 @@ async function autoScroll(page) {
 }
 
 function parseRequirements(text) {
-  const r = { minimum: { os:"",cpu:"",ram:"",gpu:"",storage:"",directx:"" }, recommended: { os:"",cpu:"",ram:"",gpu:"",storage:"",directx:"" } };
+  const r = { minimum: { os: "", cpu: "", ram: "", gpu: "", storage: "", directx: "" }, recommended: { os: "", cpu: "", ram: "", gpu: "", storage: "", directx: "" } };
   const extract = (chunk) => {
     const g = (rx) => { const m = chunk.match(rx); return m ? m[1].split("\n")[0].trim() : ""; };
-    return { os:g(/os\s*[:\-–]\s*(.+)/i), cpu:g(/(?:processor|cpu)\s*[:\-–]\s*(.+)/i), ram:g(/(?:memory|ram)\s*[:\-–]\s*(.+)/i), gpu:g(/(?:graphics|gpu|video)\s*[:\-–]\s*(.+)/i), storage:g(/(?:storage|disk|hdd|free\s*space)\s*[:\-–]\s*(.+)/i), directx:g(/directx\s*[:\-–]\s*(.+)/i) };
+    return { os: g(/os\s*[:\-–]\s*(.+)/i), cpu: g(/(?:processor|cpu)\s*[:\-–]\s*(.+)/i), ram: g(/(?:memory|ram)\s*[:\-–]\s*(.+)/i), gpu: g(/(?:graphics|gpu|video)\s*[:\-–]\s*(.+)/i), storage: g(/(?:storage|disk|hdd|free\s*space)\s*[:\-–]\s*(.+)/i), directx: g(/directx\s*[:\-–]\s*(.+)/i) };
   };
   const mi = text.search(/minimum\s*(system\s*)?req/i);
   const ri = text.search(/recommended\s*(system\s*)?req/i);
@@ -184,7 +185,7 @@ async function scrapeGame(browser, gameUrl) {
 
       let description = "";
       // Try common containers
-      for (const sel of [".entry-content",".post-content",".game-description","article",".content"]) {
+      for (const sel of [".entry-content", ".post-content", ".game-description", "article", ".content"]) {
         const el = document.querySelector(sel);
         if (el) {
           const t = el.innerText.trim();
@@ -286,7 +287,7 @@ async function getDownloadLink(browser, gamePage) {
         const p = await target.page().catch(() => null);
         if (p && p !== gamePage) {
           console.log(`    🗑  closed popup: ${p.url().substring(0, 60)}`);
-          await p.close().catch(() => {});
+          await p.close().catch(() => { });
         }
       }
     };
@@ -416,7 +417,12 @@ async function main() {
       "--disable-popup-blocking",
     ],
   });
-
+  // Connect to MongoDB
+  await mongoose.connect('mongodb+srv://xTech:tmf717008@cluster0.ldm8qdf.mongodb.net/?appName=Cluster0', {
+    useNewUrlParser: true,
+    useUnifiedTopology: true
+  });
+  console.log('✅ Connected to MongoDB');
   const results = [];
 
   try {
@@ -433,7 +439,16 @@ async function main() {
 
         // Save after each game
         fs.writeFileSync(OUTPUT, JSON.stringify(results, null, 2), "utf-8");
-
+        try {
+          await Game.findOneAndUpdate(
+            { slug: game.slug },
+            game,
+            { upsert: true, new: true, setDefaultsOnInsert: true }
+          );
+          console.log(`   💾 Saved to MongoDB`);
+        } catch (dbErr) {
+          console.error(`   ❌ MongoDB save error: ${dbErr.message}`);
+        }
         const icon = game.downloadLinks.length ? "✅" : "⚠️";
         console.log(`${icon} "${game.title}" → ${game.downloadLinks.length} download link(s)`);
         if (game.downloadLinks.length) {
@@ -446,6 +461,8 @@ async function main() {
       if (i < urls.length - 1) await sleep(BETWEEN_GAMES);
     }
   } finally {
+    await mongoose.disconnect();
+    console.log('📦 MongoDB disconnected');
     await browser.close();
   }
 
