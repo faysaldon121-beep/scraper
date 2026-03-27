@@ -1,0 +1,65 @@
+name: Scrape AnkerGames
+
+on:
+  push:
+    branches: [ main ]           # runs on push to main
+  schedule:
+    - cron: '0 0 * * *'         # daily at midnight UTC
+  workflow_dispatch:            # manual trigger
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    timeout-minutes: 360        # 6 hours (adjust if needed)
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install system dependencies (Puppeteer)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libnss3 libatk-bridge2.0-0 libdrm-dev libxkbcommon-dev \
+            libgbm-dev libasound2 libxshmfence-dev
+
+      - name: Cache Node modules
+        uses: actions/cache@v3
+        with:
+          path: node_modules
+          key: ${{ runner.os }}-node-${{ hashFiles('package-lock.json') }}
+          restore-keys: |
+            ${{ runner.os }}-node-
+
+      - name: Install dependencies
+        run: npm install puppeteer mongoose
+
+      - name: Restore progress cache
+        uses: actions/cache@v3
+        id: cache-progress
+        with:
+          path: ankergames_progress.json
+          key: progress-ankergames
+
+      - name: Run scraper
+        env:
+          MONGODB_URI: ${{ secrets.MONGODB_URI }}
+        run: node ankergames-scraper.js   # adjust if filename differs
+
+      - name: Save progress cache (always)
+        uses: actions/cache@v3
+        if: always()
+        with:
+          path: ankergames_progress.json
+          key: progress-ankergames
+
+      - name: Upload JSON results as artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ankergames_data
+          path: ankergames_data.json
