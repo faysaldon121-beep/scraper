@@ -1,9 +1,12 @@
 {
-"scripts": {
-    "scrape": "node agent.js"
+  "scripts": {
+    "scrape": "node agent.js",
+    "scrape:anker": "node agent-anker.js",
+    "scrape:pesk": "node agent-pesk.js"
   },
   "dependencies": {
-    "puppeteer": "^24.40.0",
- "mongoose": "^8.0.0"
+    "mongoose": "^8.9.3",
+    "playwright": "^1.58.2",
+    "puppeteer": "^24.40.0"
   }
 }
