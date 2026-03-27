@@ -1,855 +1,455 @@
-// // agent.js
-// const puppeteer = require('puppeteer');
-// const fs = require('fs');
-// const path = require('path');
+// scraper.js
+const puppeteer = require("puppeteer");
+const fs = require("fs");
+const path = require("path");
 
-// const BASE_URL = 'https://128.199.174.22/tag/';
-// const OUTPUT_FILE = path.join(__dirname, 'peskgames_data.json');
-// const MAX_PAGES = 50; // Safety limit
-// const TIMEOUT = 30000;
+const BASE_URL = "https://peskgames.com";
+const OUTPUT = path.join(__dirname, "games_data.json");
+const NAV_TIMEOUT = 60000;
+const BETWEEN_GAMES = 4000;
 
-// class PeskGamesAgent {
-//   constructor() {
-//     this.browser = null;
-//     this.page = null;
-//     this.results = [];
-//     this.visitedUrls = new Set();
-//   }
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-//   // ─── Launch Browser ───────────────────────────────────────────
-//   async init() {
-//     console.log('🚀 Launching browser...');
-//     this.browser = await puppeteer.launch({
-//       headless: 'new',
-//       args: [
-//         '--no-sandbox',
-//         '--disable-setuid-sandbox',
-//         '--disable-dev-shm-usage',
-//         '--disable-gpu',
-//       ],
-//       defaultViewport: { width: 1280, height: 900 },
-//     });
-//     this.page = await this.browser.newPage();
+function slugify(t) {
+  return (t || "").toLowerCase().replace(/[^\w\s-]/g, "").replace(/[\s_]+/g, "-").replace(/-+/g, "-").replace(/^-+|-+$/g, "");
+}
 
-//     // Set a realistic user agent
-//     await this.page.setUserAgent(
-//       'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
-//       '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-//     );
+function hostFrom(url) {
+  try { return new URL(url).hostname.replace(/^www\./, ""); } catch { return "Direct"; }
+}
 
-//     // Block unnecessary resources for speed
-//     await this.page.setRequestInterception(true);
-//     this.page.on('request', (req) => {
-//       const blocked = ['image', 'font', 'media'];
-//       if (blocked.includes(req.resourceType())) {
-//         req.abort();
-//       } else {
-//         req.continue();
-//       }
-//     });
+async function stealthPage(browser) {
+  const page = await browser.newPage();
+  await page.setUserAgent(
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+  );
+  await page.setViewport({ width: 1366, height: 900 });
+  await page.evaluateOnNewDocument(() => {
+    Object.defineProperty(navigator, "webdriver", { get: () => false });
+    window.chrome = { runtime: {} };
+  });
+  return page;
+}
 
-//     this.page.setDefaultNavigationTimeout(TIMEOUT);
-//     console.log('✅ Browser ready.\n');
-//   }
+async function autoScroll(page) {
+  await page.evaluate(() => new Promise((resolve) => {
+    let y = 0;
+    const iv = setInterval(() => { window.scrollBy(0, 500); y += 500; if (y >= document.body.scrollHeight) { clearInterval(iv); resolve(); } }, 150);
+    setTimeout(() => { clearInterval(iv); resolve(); }, 15000);
+  }));
+}
 
-//   // ─── Navigate with retry ─────────────────────────────────────
-//   async goto(url, retries = 2) {
-//     for (let i = 0; i <= retries; i++) {
-//       try {
-//         await this.page.goto(url, { waitUntil: 'networkidle2', timeout: TIMEOUT });
-//         return true;
-//       } catch (err) {
-//         console.warn(`  ⚠️  Retry ${i + 1} for ${url}`);
-//         if (i === retries) {
-//           console.error(`  ❌ Failed to load: ${url}`);
-//           return false;
-//         }
-//         await this.sleep(2000);
-//       }
-//     }
-//   }
+function parseRequirements(text) {
+  const r = { minimum: { os:"",cpu:"",ram:"",gpu:"",storage:"",directx:"" }, recommended: { os:"",cpu:"",ram:"",gpu:"",storage:"",directx:"" } };
+  const extract = (chunk) => {
+    const g = (rx) => { const m = chunk.match(rx); return m ? m[1].split("\n")[0].trim() : ""; };
+    return { os:g(/os\s*[:\-–]\s*(.+)/i), cpu:g(/(?:processor|cpu)\s*[:\-–]\s*(.+)/i), ram:g(/(?:memory|ram)\s*[:\-–]\s*(.+)/i), gpu:g(/(?:graphics|gpu|video)\s*[:\-–]\s*(.+)/i), storage:g(/(?:storage|disk|hdd|free\s*space)\s*[:\-–]\s*(.+)/i), directx:g(/directx\s*[:\-–]\s*(.+)/i) };
+  };
+  const mi = text.search(/minimum\s*(system\s*)?req/i);
+  const ri = text.search(/recommended\s*(system\s*)?req/i);
+  if (mi !== -1 && ri !== -1 && mi < ri) { r.minimum = extract(text.slice(mi, ri)); r.recommended = extract(text.slice(ri, ri + 1500)); }
+  else if (mi !== -1) r.minimum = extract(text.slice(mi, mi + 1500));
+  else if (ri !== -1) r.recommended = extract(text.slice(ri, ri + 1500));
+  return r;
+}
 
-//   // ─── Step 1: Discover all game/software listing links ────────
-//   async discoverListingLinks() {
-//     console.log('📡 Visiting homepage to discover listings...');
-//     const loaded = await this.goto(BASE_URL);
-//     if (!loaded) return [];
+// ═════════════════════════════════════════════════════════════
+//  STEP 1 — Collect game URLs from /en/pc-games/ + pagination
+// ═════════════════════════════════════════════════════════════
+async function collectGameUrls(browser) {
+  console.log("📋 Collecting game URLs from /en/pc-games/ …");
+  const page = await stealthPage(browser);
+  const allUrls = new Set();
 
-//     // Gather links from the main page (articles, cards, post links)
-//     let links = await this.page.evaluate((base) => {
-//       const anchors = Array.from(document.querySelectorAll('a[href]'));
-//       return anchors
-//         .map((a) => a.href)
-//         .filter((href) => {
-//           // Keep internal links that look like individual post/game pages
-//           return (
-//             href.startsWith(base) &&
-//             href !== base &&
-//             href !== base + '/' &&
-//             !href.includes('/page/') &&
-//             !href.includes('#') &&
-//             !href.includes('/category/') &&
-//             !href.includes('/tag/') &&
-//             !href.includes('/author/') &&
-//             !href.includes('/wp-admin') &&
-//             !href.includes('/feed') &&
-//             !href.includes('/comment')
-//           );
-//         });
-//     }, BASE_URL);
+  try {
+    let pageNum = 1;
 
-//     // Also check paginated listing pages
-//     const paginatedLinks = await this.discoverPaginatedLinks();
-//     links = [...links, ...paginatedLinks];
+    while (true) {
+      const listUrl = pageNum === 1
+        ? `${BASE_URL}/en/pc-games/`
+        : `${BASE_URL}/en/pc-games/page/${pageNum}`;
 
-//     // De-duplicate
-//     const unique = [...new Set(links)].slice(0, MAX_PAGES);
-//     console.log(`🔗 Found ${unique.length} unique listing links.\n`);
-//     return unique;
-//   }
+      console.log(`   page ${pageNum}: ${listUrl}`);
 
-//   // ─── Step 1b: Crawl paginated archive pages ──────────────────
-//   async discoverPaginatedLinks() {
-//     const allLinks = [];
-//     let pageNum = 2;
-//     const maxArchivePages = 10;
+      const response = await page.goto(listUrl, { waitUntil: "networkidle2", timeout: NAV_TIMEOUT }).catch(() => null);
 
-//     while (pageNum <= maxArchivePages) {
-//       const url = `${BASE_URL}/page/${pageNum}/`;
-//       console.log(`  📄 Checking archive page ${pageNum}...`);
-//       const loaded = await this.goto(url);
-//       if (!loaded) break;
-
-//       const links = await this.page.evaluate((base) => {
-//         const anchors = Array.from(document.querySelectorAll('a[href]'));
-//         return anchors
-//           .map((a) => a.href)
-//           .filter((href) => {
-//             return (
-//               href.startsWith(base) &&
-//               href !== base &&
-//               !href.includes('/page/') &&
-//               !href.includes('#') &&
-//               !href.includes('/category/') &&
-//               !href.includes('/tag/')
-//             );
-//           });
-//       }, BASE_URL);
-
-//       if (links.length === 0) break;
-//       allLinks.push(...links);
-//       pageNum++;
-//       await this.sleep(1000);
-//     }
-
-//     return allLinks;
-//   }
-
-//   // ─── Step 2: Scrape a single game/software page ──────────────
-//   async scrapeDetailPage(url) {
-//     if (this.visitedUrls.has(url)) return null;
-//     this.visitedUrls.add(url);
-
-//     console.log(`  🕹️  Scraping: ${url}`);
-//     const loaded = await this.goto(url);
-//     if (!loaded) return null;
-
-//     const data = await this.page.evaluate(() => {
-//       // --- Helper: get text or null ---
-//       const getText = (sel) => {
-//         const el = document.querySelector(sel);
-//         return el ? el.innerText.trim() : null;
-//       };
-
-//       // --- Title ---
-//       const title =
-//         getText('h1.entry-title') ||
-//         getText('h1.post-title') ||
-//         getText('h1') ||
-//         getText('title');
-
-//       // --- Description / Content ---
-//       const contentEl =
-//         document.querySelector('.entry-content') ||
-//         document.querySelector('.post-content') ||
-//         document.querySelector('article');
-//       const description = contentEl
-//         ? contentEl.innerText.trim().substring(0, 1500)
-//         : null;
-
-//       // --- Thumbnail / Featured Image ---
-//       const imgEl =
-//         document.querySelector('.entry-content img') ||
-//         document.querySelector('article img') ||
-//         document.querySelector('.post-thumbnail img');
-//       const thumbnail = imgEl ? imgEl.src : null;
-
-//       // --- Categories / Tags ---
-//       const categories = Array.from(
-//         document.querySelectorAll('a[rel="category tag"], .cat-links a, .post-categories a')
-//       ).map((a) => a.innerText.trim());
-
-//       const tags = Array.from(
-//         document.querySelectorAll('a[rel="tag"], .tag-links a, .post-tags a')
-//       ).map((a) => a.innerText.trim());
-
-//       // --- Published Date ---
-//       const dateEl =
-//         document.querySelector('time.entry-date') ||
-//         document.querySelector('.posted-on time') ||
-//         document.querySelector('time');
-//       const publishedDate = dateEl
-//         ? dateEl.getAttribute('datetime') || dateEl.innerText.trim()
-//         : null;
-
-//       // --- Download Links ---
-//       // Broad approach: grab links whose text or href hints at a download
-//       const allAnchors = Array.from(document.querySelectorAll('a[href]'));
-//       const downloadLinks = allAnchors
-//         .filter((a) => {
-//           const href = a.href.toLowerCase();
-//           const text = a.innerText.toLowerCase();
-//           const classAttr = (a.className || '').toLowerCase();
-
-//           const isDownload =
-//             text.includes('download') ||
-//             text.includes('get link') ||
-//             text.includes('mirror') ||
-//             text.includes('direct link') ||
-//             text.includes('mega') ||
-//             text.includes('mediafire') ||
-//             text.includes('gdrive') ||
-//             text.includes('google drive') ||
-//             text.includes('torrent') ||
-//             classAttr.includes('download') ||
-//             href.includes('download') ||
-//             href.includes('mega.nz') ||
-//             href.includes('mediafire.com') ||
-//             href.includes('drive.google.com') ||
-//             href.includes('magnet:') ||
-//             href.includes('.torrent') ||
-//             href.includes('1fichier') ||
-//             href.includes('uploadhaven') ||
-//             href.includes('filecrypt') ||
-//             href.includes('pixeldrain');
-
-//           return isDownload;
-//         })
-//         .map((a) => ({
-//           text: a.innerText.trim().substring(0, 200),
-//           url: a.href,
-//         }));
-
-//       // --- Metadata table (some sites use a specs/info table) ---
-//       const metaTable = {};
-//       document
-//         .querySelectorAll(
-//           '.entry-content table tr, .game-info tr, .info-table tr'
-//         )
-//         .forEach((tr) => {
-//           const cells = tr.querySelectorAll('td, th');
-//           if (cells.length >= 2) {
-//             const key = cells[0].innerText.trim();
-//             const val = cells[1].innerText.trim();
-//             if (key && val) metaTable[key] = val;
-//           }
-//         });
-
-//       // --- System Requirements (look for common headers) ---
-//       let systemRequirements = null;
-//       const headings = Array.from(
-//         document.querySelectorAll('h2, h3, h4, strong, b')
-//       );
-//       for (const h of headings) {
-//         if (
-//           h.innerText.toLowerCase().includes('system requirement') ||
-//           h.innerText.toLowerCase().includes('minimum requirement')
-//         ) {
-//           let sibling = h.nextElementSibling;
-//           const parts = [];
-//           while (sibling && !['H2', 'H3', 'H4'].includes(sibling.tagName)) {
-//             parts.push(sibling.innerText.trim());
-//             sibling = sibling.nextElementSibling;
-//           }
-//           systemRequirements = parts.join('\n').substring(0, 1000) || null;
-//           break;
-//         }
-//       }
-
-//       return {
-//         title,
-//         description: description ? description.substring(0, 800) : null,
-//         thumbnail,
-//         categories,
-//         tags,
-//         publishedDate,
-//         downloadLinks,
-//         metaTable: Object.keys(metaTable).length > 0 ? metaTable : null,
-//         systemRequirements,
-//       };
-//     });
-
-//     if (!data || !data.title) return null;
-
-//     return {
-//       ...data,
-//       sourceUrl: url,
-//       scrapedAt: new Date().toISOString(),
-//     };
-//   }
-
-//   // ─── Step 3: Follow intermediate download pages ───────────────
-//   async resolveDownloadLinks(entry) {
-//     if (!entry || !entry.downloadLinks) return entry;
-
-//     const resolved = [];
-
-//     for (const link of entry.downloadLinks) {
-//       // If link goes to an internal interstitial page, follow it
-//       if (link.url.startsWith(BASE_URL)) {
-//         console.log(`    🔍 Following internal link: ${link.url}`);
-//         try {
-//           const loaded = await this.goto(link.url);
-//           if (loaded) {
-//             const innerLinks = await this.page.evaluate(() => {
-//               return Array.from(document.querySelectorAll('a[href]'))
-//                 .filter((a) => {
-//                   const href = a.href.toLowerCase();
-//                   return (
-//                     href.includes('mega') ||
-//                     href.includes('mediafire') ||
-//                     href.includes('drive.google') ||
-//                     href.includes('torrent') ||
-//                     href.includes('1fichier') ||
-//                     href.includes('uploadhaven') ||
-//                     href.includes('pixeldrain') ||
-//                     href.includes('download') ||
-//                     href.includes('filecrypt')
-//                   );
-//                 })
-//                 .map((a) => ({
-//                   text: a.innerText.trim().substring(0, 200),
-//                   url: a.href,
-//                 }));
-//             });
-
-//             if (innerLinks.length > 0) {
-//               resolved.push(...innerLinks);
-//             } else {
-//               resolved.push(link);
-//             }
-//           }
-//         } catch {
-//           resolved.push(link);
-//         }
-//       } else {
-//         resolved.push(link);
-//       }
-//     }
-
-//     // De-duplicate download links
-//     const seen = new Set();
-//     entry.downloadLinks = resolved.filter((l) => {
-//       if (seen.has(l.url)) return false;
-//       seen.add(l.url);
-//       return true;
-//     });
-
-//     return entry;
-//   }
-
-//   // ─── Orchestrator ─────────────────────────────────────────────
-//   async run() {
-//     try {
-//       await this.init();
-
-//       // Step 1 — discover all listing pages
-//       const listingLinks = await this.discoverListingLinks();
-
-//       if (listingLinks.length === 0) {
-//         console.log('⚠️  No listing links found. The site structure may have changed.');
-//         await this.saveResults();
-//         return;
-//       }
-
-//       // Step 2 — scrape each detail page
-//       for (const link of listingLinks) {
-//         try {
-//           let entry = await this.scrapeDetailPage(link);
-//           if (entry) {
-//             // Step 3 — follow interstitial download pages
-//             entry = await this.resolveDownloadLinks(entry);
-//             this.results.push(entry);
-//             console.log(
-//               `    ✅ "${entry.title}" — ${entry.downloadLinks.length} download link(s)\n`
-//             );
-//           }
-//         } catch (err) {
-//           console.error(`    ❌ Error scraping ${link}: ${err.message}`);
-//         }
-//         // Be polite — throttle requests
-//         await this.sleep(1500);
-//       }
-
-//       // Step 4 — save to JSON
-//       await this.saveResults();
-//     } catch (err) {
-//       console.error('💥 Fatal error:', err);
-//     } finally {
-//       await this.shutdown();
-//     }
-//   }
-
-//   // ─── Save JSON ────────────────────────────────────────────────
-//   async saveResults() {
-//     const output = {
-//       source: BASE_URL,
-//       scrapedAt: new Date().toISOString(),
-//       totalEntries: this.results.length,
-//       entries: this.results,
-//     };
-
-//     fs.writeFileSync(OUTPUT_FILE, JSON.stringify(output, null, 2), 'utf-8');
-//     console.log(`\n💾 Saved ${this.results.length} entries to ${OUTPUT_FILE}`);
-//   }
-
-//   // ─── Helpers ──────────────────────────────────────────────────
-//   sleep(ms) {
-//     return new Promise((resolve) => setTimeout(resolve, ms));
-//   }
-
-//   async shutdown() {
-//     if (this.browser) {
-//       await this.browser.close();
-//       console.log('🛑 Browser closed.');
-//     }
-//   }
-// }
-
-// // ─── Run the agent ──────────────────────────────────────────────
-// (async () => {
-//   const agent = new PeskGamesAgent();
-//   await agent.run();
-// })();
-
-
-
-
-// agent.js
-const puppeteer = require('puppeteer');
-const mongoose = require('mongoose');
-const fs = require('fs');
-const path = require('path');
-
-// Import the Video model (we'll define it next)
-const Video = require('./models/Video');
-
-const BASE_URL = 'https://128.199.174.22/tag/';  // replace with actual adult site URL
-const OUTPUT_FILE = path.join(__dirname, 'videos_data.json');
-const MAX_PAGES = 50;
-const TIMEOUT = 30000;
-
-class AdultVideoScraper {
-  constructor() {
-    this.browser = null;
-    this.page = null;
-    this.results = [];
-    this.visitedUrls = new Set();
-  }
-
-  async init() {
-    console.log('🚀 Launching browser...');
-    this.browser = await puppeteer.launch({
-      headless: 'new',
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-      ],
-      defaultViewport: { width: 1280, height: 900 },
-    });
-    this.page = await this.browser.newPage();
-    await this.page.setUserAgent(
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
-      '(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-    );
-
-    // Block unnecessary resources for speed
-    await this.page.setRequestInterception(true);
-    this.page.on('request', (req) => {
-      const blocked = ['image', 'font', 'media']; // we might want images for thumbnails
-      if (blocked.includes(req.resourceType())) {
-        req.abort();
-      } else {
-        req.continue();
-      }
-    });
-
-    this.page.setDefaultNavigationTimeout(TIMEOUT);
-    console.log('✅ Browser ready.\n');
-  }
-
-  async goto(url, retries = 2) {
-    for (let i = 0; i <= retries; i++) {
-      try {
-        await this.page.goto(url, { waitUntil: 'networkidle2', timeout: TIMEOUT });
-        // Handle age verification if present
-        await this.handleAgeVerification();
-        return true;
-      } catch (err) {
-        console.warn(`  ⚠️  Retry ${i + 1} for ${url}`);
-        if (i === retries) {
-          console.error(`  ❌ Failed to load: ${url}`);
-          return false;
-        }
-        await this.sleep(2000);
-      }
-    }
-  }
-
-  async handleAgeVerification() {
-    // Common adult site popups – try to click the "I am 18+" or similar button
-    const ageSelectors = [
-      'button[data-age-gate]',
-      'button:contains("I am 18+")',
-      'a:contains("Enter")',
-      '#age-gate button',
-      '.age-verification button',
-    ];
-    for (const selector of ageSelectors) {
-      const button = await this.page.$(selector);
-      if (button) {
-        await button.click();
-        console.log('  ✅ Age verification accepted.');
-        await this.sleep(2000);
+      // If page doesn't exist or redirects away, stop pagination
+      if (!response || response.status() >= 400) {
+        console.log(`   → page ${pageNum} returned ${response?.status() || "no response"}, stopping`);
         break;
       }
-    }
-  }
 
-  async discoverListingLinks() {
-    console.log('📡 Visiting homepage to discover video listings...');
-    const loaded = await this.goto(BASE_URL);
-    if (!loaded) return [];
+      // Check if we got redirected away from the games list
+      const currentUrl = page.url();
+      if (pageNum > 1 && !currentUrl.includes("/pc-games/")) {
+        console.log(`   → redirected to ${currentUrl}, stopping`);
+        break;
+      }
 
-    let links = await this.page.evaluate((base) => {
-      const anchors = Array.from(document.querySelectorAll('a[href]'));
-      return anchors
-        .map((a) => a.href)
-        .filter((href) => {
-          // Adjust filters to match adult video page structure
-          return (
-            href.startsWith(base) &&
-            href !== base &&
-            href !== base + '/' &&
-            !href.includes('/page/') &&
-            !href.includes('#') &&
-            !href.includes('/category/') &&
-            !href.includes('/tag/') &&
-            !href.includes('/author/') &&
-            !href.includes('/wp-admin') &&
-            !href.includes('/feed') &&
-            !href.includes('/comment')
-          );
+      await autoScroll(page);
+      await sleep(1000);
+
+      // Extract game links: /en/pc-games/SLUG (not /page/N)
+      const urls = await page.evaluate(() => {
+        const found = [];
+        document.querySelectorAll("a[href]").forEach((a) => {
+          const href = a.href;
+          // Match: /en/pc-games/some-game-slug
+          // Exclude: /en/pc-games/  (category itself)
+          //          /en/pc-games/page/N  (pagination)
+          const m = href.match(/\/en\/pc-games\/([^/?#]+)\/?$/);
+          if (m && m[1] && !m[1].startsWith("page")) {
+            found.push(href.replace(/\/+$/, ""));
+          }
         });
-    }, BASE_URL);
-
-    const paginatedLinks = await this.discoverPaginatedLinks();
-    links = [...links, ...paginatedLinks];
-    const unique = [...new Set(links)].slice(0, MAX_PAGES);
-    console.log(`🔗 Found ${unique.length} unique video links.\n`);
-    return unique;
-  }
-
-  async discoverPaginatedLinks() {
-    const allLinks = [];
-    let pageNum = 2;
-    const maxArchivePages = 10;
-
-    while (pageNum <= maxArchivePages) {
-      const url = `${BASE_URL}/page/${pageNum}/`;
-      console.log(`  📄 Checking archive page ${pageNum}...`);
-      const loaded = await this.goto(url);
-      if (!loaded) break;
-
-      const links = await this.page.evaluate((base) => {
-        const anchors = Array.from(document.querySelectorAll('a[href]'));
-        return anchors
-          .map((a) => a.href)
-          .filter((href) => {
-            return (
-              href.startsWith(base) &&
-              href !== base &&
-              !href.includes('/page/') &&
-              !href.includes('#') &&
-              !href.includes('/category/') &&
-              !href.includes('/tag/')
-            );
-          });
-      }, BASE_URL);
-
-      if (links.length === 0) break;
-      allLinks.push(...links);
-      pageNum++;
-      await this.sleep(1000);
-    }
-
-    return allLinks;
-  }
-
-  async scrapeDetailPage(url) {
-    if (this.visitedUrls.has(url)) return null;
-    this.visitedUrls.add(url);
-
-    console.log(`  🎥 Scraping: ${url}`);
-    const loaded = await this.goto(url);
-    if (!loaded) return null;
-
-    const data = await this.page.evaluate(() => {
-      const getText = (sel) => {
-        const el = document.querySelector(sel);
-        return el ? el.innerText.trim() : null;
-      };
-
-      // Title
-      const title = getText('h1.entry-title') || getText('h1.post-title') || getText('h1') || getText('title');
-
-      // Description / synopsis
-      const contentEl = document.querySelector('.entry-content') || document.querySelector('.post-content') || document.querySelector('article');
-      const description = contentEl ? contentEl.innerText.trim().substring(0, 1500) : null;
-
-      // Thumbnail / preview image
-      const imgEl = document.querySelector('.entry-content img') || document.querySelector('article img') || document.querySelector('.post-thumbnail img');
-      const thumbnail = imgEl ? imgEl.src : null;
-
-      // Categories / tags (could be niche, model, etc.)
-      const categories = Array.from(
-        document.querySelectorAll('a[rel="category tag"], .cat-links a, .post-categories a')
-      ).map((a) => a.innerText.trim());
-
-      const tags = Array.from(
-        document.querySelectorAll('a[rel="tag"], .tag-links a, .post-tags a')
-      ).map((a) => a.innerText.trim());
-
-      // Published date
-      const dateEl = document.querySelector('time.entry-date') || document.querySelector('.posted-on time') || document.querySelector('time');
-      const publishedDate = dateEl ? dateEl.getAttribute('datetime') || dateEl.innerText.trim() : null;
-
-      // Video download / embed links
-      const allAnchors = Array.from(document.querySelectorAll('a[href]'));
-      const downloadLinks = allAnchors
-        .filter((a) => {
-          const href = a.href.toLowerCase();
-          const text = a.innerText.toLowerCase();
-          const classAttr = (a.className || '').toLowerCase();
-
-          const isDownload =
-            text.includes('download') ||
-            text.includes('get link') ||
-            text.includes('mirror') ||
-            text.includes('direct link') ||
-            text.includes('watch') ||
-            text.includes('play') ||
-            text.includes('stream') ||
-            classAttr.includes('download') ||
-            href.includes('download') ||
-            href.includes('mega.nz') ||
-            href.includes('mediafire.com') ||
-            href.includes('drive.google.com') ||
-            href.includes('magnet:') ||
-            href.includes('.mp4') ||
-            href.includes('.mkv') ||
-            href.includes('.avi');
-          return isDownload;
-        })
-        .map((a) => ({
-          text: a.innerText.trim().substring(0, 200),
-          url: a.href,
-        }));
-
-      // Metadata table (duration, quality, actors, etc.)
-      const metaTable = {};
-      document.querySelectorAll('.entry-content table tr, .video-info tr, .info-table tr').forEach((tr) => {
-        const cells = tr.querySelectorAll('td, th');
-        if (cells.length >= 2) {
-          const key = cells[0].innerText.trim();
-          const val = cells[1].innerText.trim();
-          if (key && val) metaTable[key] = val;
-        }
+        return found;
       });
 
-      // Additional video-specific fields (if structured data is present)
-      let duration = null;
-      let quality = null;
-      let actors = [];
+      const before = allUrls.size;
+      urls.forEach((u) => allUrls.add(u));
+      const newCount = allUrls.size - before;
+      console.log(`   → found ${urls.length} links, ${newCount} new (total: ${allUrls.size})`);
 
-      // Look for duration in meta table or via selectors
-      if (metaTable['Duration'] || metaTable['Runtime']) {
-        duration = metaTable['Duration'] || metaTable['Runtime'];
-      } else {
-        const durEl = document.querySelector('.duration, .runtime, .video-length');
-        if (durEl) duration = durEl.innerText.trim();
+      // If no new games found, stop
+      if (newCount === 0 && pageNum > 1) {
+        console.log(`   → no new games, stopping pagination`);
+        break;
       }
 
-      if (metaTable['Quality'] || metaTable['Resolution']) {
-        quality = metaTable['Quality'] || metaTable['Resolution'];
+      // Check if there's a next page link
+      const hasNext = await page.evaluate((num) => {
+        const nextUrl = `/en/pc-games/page/${num + 1}`;
+        return !!document.querySelector(`a[href*="${nextUrl}"]`);
+      }, pageNum);
+
+      if (!hasNext) {
+        console.log(`   → no link to page ${pageNum + 1}, stopping`);
+        break;
       }
 
-      if (metaTable['Actors'] || metaTable['Stars']) {
-        actors = (metaTable['Actors'] || metaTable['Stars']).split(',').map(s => s.trim());
-      }
-
-      return {
-        title,
-        description: description ? description.substring(0, 800) : null,
-        thumbnail,
-        categories,
-        tags,
-        publishedDate,
-        downloadLinks,
-        metaTable: Object.keys(metaTable).length > 0 ? metaTable : null,
-        duration,
-        quality,
-        actors,
-      };
-    });
-
-    if (!data || !data.title) return null;
-
-    return {
-      ...data,
-      sourceUrl: url,
-      scrapedAt: new Date().toISOString(),
-    };
-  }
-
-  async resolveDownloadLinks(entry) {
-    if (!entry || !entry.downloadLinks) return entry;
-
-    const resolved = [];
-    for (const link of entry.downloadLinks) {
-      if (link.url.startsWith(BASE_URL)) {
-        console.log(`    🔍 Following internal link: ${link.url}`);
-        try {
-          const loaded = await this.goto(link.url);
-          if (loaded) {
-            const innerLinks = await this.page.evaluate(() => {
-              return Array.from(document.querySelectorAll('a[href]'))
-                .filter((a) => {
-                  const href = a.href.toLowerCase();
-                  return (
-                    href.includes('mega') ||
-                    href.includes('mediafire') ||
-                    href.includes('drive.google') ||
-                    href.includes('magnet:') ||
-                    href.includes('.mp4') ||
-                    href.includes('download')
-                  );
-                })
-                .map((a) => ({
-                  text: a.innerText.trim().substring(0, 200),
-                  url: a.href,
-                }));
-            });
-            if (innerLinks.length > 0) resolved.push(...innerLinks);
-            else resolved.push(link);
-          }
-        } catch {
-          resolved.push(link);
-        }
-      } else {
-        resolved.push(link);
-      }
+      pageNum++;
+      await sleep(1500);
     }
 
-    const seen = new Set();
-    entry.downloadLinks = resolved.filter((l) => {
-      if (seen.has(l.url)) return false;
-      seen.add(l.url);
-      return true;
-    });
-    return entry;
-  }
-
-  async saveToDatabase(entry) {
-    try {
-      const result = await Video.findOneAndUpdate(
-        { sourceUrl: entry.sourceUrl },
-        { $set: entry },
-        { upsert: true, new: true, setDefaultsOnInsert: true }
-      );
-      console.log(`    💾 Saved/Updated "${entry.title}" to DB (id: ${result._id})`);
-    } catch (err) {
-      console.error(`    ❌ Failed to save ${entry.title}: ${err.message}`);
-    }
-  }
-
-  async run() {
-    try {
-      await this.init();
-
-      const listingLinks = await this.discoverListingLinks();
-      if (listingLinks.length === 0) {
-        console.log('⚠️  No video links found.');
-        return;
-      }
-
-      for (const link of listingLinks) {
-        try {
-          let entry = await this.scrapeDetailPage(link);
-          if (entry) {
-            entry = await this.resolveDownloadLinks(entry);
-            await this.saveToDatabase(entry);
-            this.results.push(entry);
-            console.log(`    ✅ "${entry.title}" — ${entry.downloadLinks.length} download link(s)\n`);
-          }
-        } catch (err) {
-          console.error(`    ❌ Error scraping ${link}: ${err.message}`);
-        }
-        await this.sleep(1500);
-      }
-
-      console.log(`\n🎉 Scraping complete. ${this.results.length} videos saved to DB.`);
-    } catch (err) {
-      console.error('💥 Fatal error:', err);
-    } finally {
-      await this.shutdown();
-    }
-  }
-
-  sleep(ms) {
-    return new Promise((resolve) => setTimeout(resolve, ms));
-  }
-
-  async shutdown() {
-    if (this.browser) {
-      await this.browser.close();
-      console.log('🛑 Browser closed.');
-    }
-    await mongoose.connection.close();
-    console.log('🔌 MongoDB connection closed.');
+    const result = [...allUrls];
+    console.log(`\n   ✅ Total: ${result.length} game URL(s)\n`);
+    return result;
+  } finally {
+    await page.close();
   }
 }
 
-// Connect to MongoDB and start
-(async () => {
+// ═════════════════════════════════════════════════════════════
+//  STEP 2 — Scrape one game page + get download link
+// ═════════════════════════════════════════════════════════════
+async function scrapeGame(browser, gameUrl) {
+  const page = await stealthPage(browser);
+
   try {
-    const mongoUri = process.env.MONGODB_URI;
-    if (!mongoUri) {
-      throw new Error('MONGODB_URI not defined. Set it in environment variables.');
+    await page.goto(gameUrl, { waitUntil: "networkidle2", timeout: NAV_TIMEOUT });
+    await autoScroll(page);
+    await sleep(1000);
+
+    // ── Extract metadata ────────────────────────────────────
+    const raw = await page.evaluate(() => {
+      const body = document.body.innerText || "";
+      const pick = (...ss) => {
+        for (const s of ss) {
+          const el = document.querySelector(s);
+          if (el?.textContent?.trim()) return el.textContent.trim();
+        }
+        return "";
+      };
+
+      let title = pick("h1", "h2", ".entry-title", ".post-title");
+      if (!title) title = document.title.split(/[|\-–]/)[0].trim();
+
+      let coverImage = "";
+      const imgs = document.querySelectorAll("img");
+      for (const img of imgs) {
+        const src = img.src || img.dataset.src || "";
+        if (src && (img.naturalWidth > 200 || img.width > 200)) {
+          coverImage = src;
+          break;
+        }
+      }
+
+      const images = [];
+      document.querySelectorAll("img").forEach((img) => {
+        const src = img.src || img.dataset.src;
+        if (src && !images.includes(src) && (img.naturalWidth > 100 || img.width > 100)) {
+          images.push(src);
+        }
+      });
+
+      let description = "";
+      // Try common containers
+      for (const sel of [".entry-content",".post-content",".game-description","article",".content"]) {
+        const el = document.querySelector(sel);
+        if (el) {
+          const t = el.innerText.trim();
+          if (t.length > description.length) description = t;
+        }
+      }
+      // Fallback: all paragraphs
+      if (!description) {
+        description = [...document.querySelectorAll("p")]
+          .map((p) => p.textContent.trim())
+          .filter((t) => t.length > 20)
+          .join("\n\n");
+      }
+
+      const grab = (rx) => { const m = body.match(rx); return m ? m[1].split("\n")[0].trim() : ""; };
+      const fsM = body.match(/([\d.,]+)\s*(GB|MB|TB)/i);
+
+      // Check if download_link button exists
+      const hasDownloadBtn = !!document.querySelector("button.download_link");
+
+      return {
+        title,
+        coverImage,
+        images,
+        description,
+        fileSize: fsM ? `${fsM[1]} ${fsM[2].toUpperCase()}` : "",
+        genre: grab(/genre\s*[:\-–]\s*(.+)/i),
+        developer: grab(/developer\s*[:\-–]\s*(.+)/i) || "Unknown",
+        publisher: grab(/publisher\s*[:\-–]\s*(.+)/i) || "Unknown",
+        version: grab(/version\s*[:\-–]?\s*([\w.\d]+)/i) || "1.0",
+        releaseDate: grab(/release\s*date\s*[:\-–]\s*(.+)/i),
+        averageRating: (() => { const m = body.match(/([\d.]+)\s*\/\s*5/i); return m ? parseFloat(m[1]) : 0; })(),
+        downloadCount: (() => { const m = body.match(/([\d,]+)\s*(?:downloads?|times)/i); return m ? parseInt(m[1].replace(/,/g, ""), 10) : 0; })(),
+        tags: [...document.querySelectorAll('.tags a, a[href*="tag/"], [class*=tag] a')].map((e) => e.textContent.trim()).filter(Boolean),
+        installationGuide: [...document.querySelectorAll("ol li")].map((li) => li.textContent.trim()),
+        unzipPassword: grab(/(?:unzip\s+)?password\s*[:\-–]\s*(\S+)/i),
+        bodyText: body,
+        hasDownloadBtn,
+      };
+    });
+
+    console.log(`  title: "${raw.title}"`);
+    console.log(`  download button found: ${raw.hasDownloadBtn}`);
+
+    // ── Get the download link ───────────────────────────────
+    let dlUrl = null;
+    if (raw.hasDownloadBtn) {
+      dlUrl = await getDownloadLink(browser, page);
+    } else {
+      console.log("  ⚠️  no button.download_link on this page");
     }
 
-    await mongoose.connect(mongoUri, {
-      useNewUrlParser: true,
-      useUnifiedTopology: true,
-    });
-    console.log('✅ Connected to MongoDB Atlas');
+    const requirements = parseRequirements(raw.bodyText);
+    const now = new Date().toISOString();
 
-    const scraper = new AdultVideoScraper();
-    await scraper.run();
-  } catch (err) {
-    console.error('Failed to connect to MongoDB:', err);
-    process.exit(1);
+    return {
+      title: raw.title || "Untitled",
+      slug: slugify(raw.title),
+      description: raw.description,
+      shortDescription: (raw.description || "").substring(0, 200),
+      coverImage: raw.coverImage || "https://placehold.co/800x450/0f0f1a/7c3aed?text=No+Image",
+      images: raw.images,
+      genre: raw.genre || "PC Game",
+      platforms: ["PC"],
+      version: raw.version,
+      developer: raw.developer,
+      publisher: raw.publisher,
+      releaseDate: raw.releaseDate || now,
+      requirements,
+      installationGuide: raw.installationGuide,
+      downloadLinks: dlUrl
+        ? [{ label: "Direct Download", url: dlUrl, size: raw.fileSize, host: hostFrom(dlUrl) }]
+        : [],
+      fileSize: raw.fileSize,
+      isFeatured: false,
+      averageRating: raw.averageRating,
+      reviewCount: 0,
+      downloadCount: raw.downloadCount,
+      tags: raw.tags,
+      changelog: "",
+      _unzipPassword: raw.unzipPassword,
+      createdAt: now,
+      updatedAt: now,
+    };
+  } finally {
+    await page.close();
   }
-})();
+}
+
+// ═════════════════════════════════════════════════════════════
+//  STEP 3 — Click "Direct Download" → wait for redirect
+//           to /en/downloads/ → wait for zulu.peskgames.net link
+// ═════════════════════════════════════════════════════════════
+async function getDownloadLink(browser, gamePage) {
+  try {
+    // ── Close any new tabs that open (ads) ──────────────────
+    const closePopups = async (target) => {
+      if (target.type() === "page") {
+        const p = await target.page().catch(() => null);
+        if (p && p !== gamePage) {
+          console.log(`    🗑  closed popup: ${p.url().substring(0, 60)}`);
+          await p.close().catch(() => {});
+        }
+      }
+    };
+    browser.on("targetcreated", closePopups);
+
+    // ── Click button.download_link ──────────────────────────
+    console.log("  🖱  clicking button.download_link …");
+
+    // Wait for navigation that will happen when openLinkWithInf777o() runs
+    const [navigation] = await Promise.all([
+      gamePage.waitForNavigation({ waitUntil: "networkidle2", timeout: 30000 }).catch(() => null),
+      gamePage.click("button.download_link"),
+    ]);
+
+    const afterClickUrl = gamePage.url();
+    console.log(`  → navigated to: ${afterClickUrl}`);
+
+    // ── We should now be on /en/downloads/ ──────────────────
+    // Wait for the countdown (~3 seconds + buffer)
+    console.log("  ⏳ waiting 8s for countdown + link generation…");
+    await sleep(8000);
+
+    // ── Now look for the zulu.peskgames.net link ────────────
+    // Strategy: poll the DOM every second for up to 30 seconds
+    let downloadUrl = null;
+
+    for (let attempt = 0; attempt < 20; attempt++) {
+      downloadUrl = await gamePage.evaluate(() => {
+        // 1) Check all <a> tags for peskgames.net links
+        for (const a of document.querySelectorAll("a[href]")) {
+          const href = a.href;
+          // The download link is on a subdomain of peskgames.net (e.g. zulu.peskgames.net)
+          if (/peskgames\.net/i.test(href)) return href;
+          // Also check for JWT-style URLs (eyJ...)
+          if (/\/eyJ[A-Za-z0-9_-]+\./i.test(href)) return href;
+        }
+
+        // 2) Check onclick attributes and data attributes
+        for (const el of document.querySelectorAll("[onclick],[data-url],[data-href],[data-link]")) {
+          const onclick = el.getAttribute("onclick") || "";
+          const dataUrl = el.dataset.url || el.dataset.href || el.dataset.link || "";
+          for (const str of [onclick, dataUrl]) {
+            const m = str.match(/https?:\/\/[^\s"'`<>\\)]+peskgames\.net[^\s"'`<>\\)]*/i);
+            if (m) return m[0];
+            const jwt = str.match(/https?:\/\/[^\s"'`<>\\)]*\/eyJ[A-Za-z0-9_-]+\.[^\s"'`<>\\)]*/i);
+            if (jwt) return jwt[0];
+          }
+        }
+
+        // 3) Check window.location (maybe it sets location.href)
+        if (/peskgames\.net/i.test(window.location.href)) return window.location.href;
+
+        // 4) Search all inline scripts
+        for (const script of document.querySelectorAll("script:not([src])")) {
+          const text = script.textContent || "";
+          const m = text.match(/https?:\/\/[^\s"'`<>\\)]*peskgames\.net[^\s"'`<>\\)]*/i);
+          if (m) return m[0].replace(/["'`;].*$/, "");
+          const jwt = text.match(/https?:\/\/[^\s"'`<>\\)]*\/eyJ[A-Za-z0-9_-]+\.[^\s"'`<>\\)]*/i);
+          if (jwt) return jwt[0].replace(/["'`;].*$/, "");
+        }
+
+        // 5) Check meta refresh
+        const meta = document.querySelector('meta[http-equiv="refresh"]');
+        if (meta) {
+          const content = meta.getAttribute("content") || "";
+          const m = content.match(/url=(.+)/i);
+          if (m && /peskgames\.net/i.test(m[1])) return m[1].trim();
+        }
+
+        return null;
+      });
+
+      if (downloadUrl) break;
+
+      // Also check if the page itself redirected to the download URL
+      const currentUrl = gamePage.url();
+      if (/peskgames\.net/i.test(currentUrl) || /\/eyJ[A-Za-z0-9_-]+\./i.test(currentUrl)) {
+        downloadUrl = currentUrl;
+        break;
+      }
+
+      await sleep(1500);
+    }
+
+    browser.off("targetcreated", closePopups);
+
+    if (downloadUrl) {
+      // Clean up the URL
+      downloadUrl = downloadUrl.replace(/["'`;>\s].*$/, "").trim();
+      console.log(`  ✅ download link: ${downloadUrl.substring(0, 100)}…`);
+    } else {
+      // Last resort: dump what's on the page
+      console.log("  ⚠️  download link not found after polling");
+      const debugInfo = await gamePage.evaluate(() => ({
+        url: window.location.href,
+        links: [...document.querySelectorAll("a[href]")].slice(0, 20).map((a) => ({
+          text: a.textContent.trim().substring(0, 50),
+          href: a.href,
+        })),
+        bodySnippet: (document.body.innerText || "").substring(0, 500),
+      }));
+      console.log(`  current URL: ${debugInfo.url}`);
+      console.log(`  links on page:`);
+      debugInfo.links.forEach((l) => console.log(`    "${l.text}" → ${l.href}`));
+      console.log(`  text: ${debugInfo.bodySnippet.replace(/\n/g, " | ").substring(0, 300)}`);
+    }
+
+    return downloadUrl;
+  } catch (err) {
+    console.error(`  ❌ download extraction error: ${err.message}`);
+    return null;
+  }
+}
+
+// ═════════════════════════════════════════════════════════════
+//  MAIN
+// ═════════════════════════════════════════════════════════════
+async function main() {
+  console.log("🚀 Starting scraper…\n");
+
+  const browser = await puppeteer.launch({
+    headless: "new",
+    defaultViewport: { width: 1366, height: 900 },
+    args: [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-popup-blocking",
+    ],
+  });
+
+  const results = [];
+
+  try {
+    const urls = await collectGameUrls(browser);
+
+    for (let i = 0; i < urls.length; i++) {
+      console.log(`\n${"═".repeat(60)}`);
+      console.log(`[${i + 1}/${urls.length}] ${urls[i]}`);
+      console.log("═".repeat(60));
+
+      try {
+        const game = await scrapeGame(browser, urls[i]);
+        results.push(game);
+
+        // Save after each game
+        fs.writeFileSync(OUTPUT, JSON.stringify(results, null, 2), "utf-8");
+
+        const icon = game.downloadLinks.length ? "✅" : "⚠️";
+        console.log(`${icon} "${game.title}" → ${game.downloadLinks.length} download link(s)`);
+        if (game.downloadLinks.length) {
+          console.log(`   ${game.downloadLinks[0].url.substring(0, 100)}`);
+        }
+      } catch (err) {
+        console.error(`❌ ${err.message}`);
+      }
+
+      if (i < urls.length - 1) await sleep(BETWEEN_GAMES);
+    }
+  } finally {
+    await browser.close();
+  }
+
+  console.log(`\n✨ Done — ${results.length} game(s) → ${OUTPUT}\n`);
+}
+
+main().catch(console.error);
