@@ -1,65 +1,65 @@
-name: Scrape AnkerGames
+name: Scrape-anker-games
 
 on:
-  push:
-    branches: [ main ]           # runs on push to main
   schedule:
-    - cron: '0 0 * * *'         # daily at midnight UTC
-  workflow_dispatch:            # manual trigger
+    - cron: '0 3 * * *'   # daily at 3:00 UTC
+  workflow_dispatch:      # manual trigger
 
 jobs:
   scrape:
-    runs-on: ubuntu-latest
-    timeout-minutes: 360        # 6 hours (adjust if needed)
+    runs-on: ubuntu-22.04  # Pin to Ubuntu 22.04
 
     steps:
-      - name: Checkout repository
+      - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '18'  # LTS version
+          cache: 'npm'
 
-      - name: Install system dependencies (Puppeteer)
+      - name: Install dependencies
+        run: npm install
+
+      - name: Install Puppeteer dependencies (Ubuntu 22.04 tested)
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            libnss3 libatk-bridge2.0-0 libdrm-dev libxkbcommon-dev \
-            libgbm-dev libasound2 libxshmfence-dev
-
-      - name: Cache Node modules
-        uses: actions/cache@v3
-        with:
-          path: node_modules
-          key: ${{ runner.os }}-node-${{ hashFiles('package-lock.json') }}
-          restore-keys: |
-            ${{ runner.os }}-node-
-
-      - name: Install dependencies
-        run: npm install puppeteer mongoose
-
-      - name: Restore progress cache
-        uses: actions/cache@v3
-        id: cache-progress
-        with:
-          path: ankergames_progress.json
-          key: progress-ankergames
+            libx11-xcb1 \
+            libxcomposite1 \
+            libxcursor1 \
+            libxdamage1 \
+            libxi6 \
+            libxtst6 \
+            libnss3 \
+            libcups2 \
+            libxss1 \
+            libxrandr2 \
+            libasound2 \
+            libatk1.0-0 \
+            libatk-bridge2.0-0 \
+            libpangocairo-1.0-0 \
+            libgtk-3-0 \
+            libgbm1 \
+            libdrm2 \
+            libxkbcommon0 \
+            libgcc1 \
+            libglib2.0-0 \
+            libnspr4 \
+            libpango-1.0-0 \
+            libstdc++6 \
+            libx11-6 \
+            libxcb1 \
+            libxext6 \
+            libxfixes3 \
+            libxrender1 \
+            ca-certificates \
+            fonts-liberation \
+            wget \
+            xdg-utils
 
       - name: Run scraper
+        run: node agent-anker.js
         env:
           MONGODB_URI: ${{ secrets.MONGODB_URI }}
-        run: node agent-anker.js   # adjust if filename differs
-
-      - name: Save progress cache (always)
-        uses: actions/cache@v3
-        if: always()
-        with:
-          path: ankergames_progress.json
-          key: progress-ankergames
-
-      - name: Upload JSON results as artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ankergames_data
-          path: ankergames_data.json
