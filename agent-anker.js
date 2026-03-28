@@ -91,7 +91,7 @@ async function saveProgress(progress, game = null) {
   try {
     fs.writeFileSync(PROGRESS_FILE, JSON.stringify(progress, null, 2), "utf-8");
     if (game) {
-      const Game = require("./models/Game");
+      const Game = require("./models/Game.js");
       const doc = gameForMongo(game);
       await Game.findOneAndUpdate({ slug: doc.slug }, doc, {
         upsert: true,
