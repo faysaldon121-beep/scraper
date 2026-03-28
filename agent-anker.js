@@ -11,9 +11,7 @@ const NAV_TIMEOUT = 60000;
 const BETWEEN_GAMES = 3000;
 
 /** Prefer env; falls back to project default if unset */
-const MONGODB_URI =
-  process.env.MONGODB_URI ||
-  "mongodb+srv://xTech:tmf717008@cluster0.ldm8qdf.mongodb.net/?appName=Cluster0";
+const MONGODB_URI =  "mongodb+srv://xTech:tmf717008@cluster0.ldm8qdf.mongodb.net/anker?appName=Cluster0";
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
