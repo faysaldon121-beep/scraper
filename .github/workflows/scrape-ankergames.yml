@@ -1,8 +1,7 @@
 name: Scrape-anker-games
 
 on:
-  schedule:
-    - cron: '0 3 * * *'   # daily at 3:00 UTC
+   # daily at 3:00 UTC
   workflow_dispatch:      # manual trigger
 
 jobs:
